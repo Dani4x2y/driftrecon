@@ -159,11 +159,30 @@ type Server struct {
 	Addr string
 
 	queries atomic.Int64
+	mu      sync.Mutex
+	asked   map[string]struct{}
 }
 
 // Queries returns how many questions the server has received.
 func (s *Server) Queries() int64 {
 	return s.queries.Load()
+}
+
+// Queried reports whether any question about name has been received.
+func (s *Server) Queried(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.asked[key(name)]
+	return ok
+}
+
+func (s *Server) record(req *dns.Msg) {
+	s.queries.Add(1)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, q := range req.Question {
+		s.asked[strings.ToLower(q.Name)] = struct{}{}
+	}
 }
 
 // Start serves zone until the test ends.
@@ -190,9 +209,9 @@ func Start(t testing.TB, zone *Zone) *Server {
 		t.Fatalf("dnstest: no free port pair: %v", err)
 	}
 
-	s := &Server{Addr: pc.LocalAddr().String()}
+	s := &Server{Addr: pc.LocalAddr().String(), asked: make(map[string]struct{})}
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
-		s.queries.Add(1)
+		s.record(req)
 		zone.ServeDNS(w, req)
 	})
 

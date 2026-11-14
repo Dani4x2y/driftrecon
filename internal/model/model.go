@@ -42,7 +42,10 @@ const (
 	StateUnresolved State = "unresolved"
 	// StateWildcard: resolves, but only to what a wildcard record returns.
 	StateWildcard State = "wildcard"
-	// StateError: the lookup failed, so nothing is known for this scan.
+	// StateUnreachable: a service that used to answer no longer does.
+	StateUnreachable State = "unreachable"
+	// StateError: the asset could not be examined, so nothing is known for
+	// this scan.
 	StateError State = "error"
 )
 

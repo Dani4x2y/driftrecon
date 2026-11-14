@@ -21,7 +21,11 @@ const Version = 1
 // Layers holds one hash per observed layer. A layer that was not observed is
 // left empty.
 type Layers struct {
-	DNS string
+	DNS      string
+	TLS      string
+	Headers  string
+	Redirect string
+	DOM      string
 }
 
 // Composite folds all layers into the single fingerprint used to decide
@@ -29,6 +33,18 @@ type Layers struct {
 func (l Layers) Composite() string {
 	d := newDigest("composite")
 	d.field("dns", l.DNS)
+	// The service layers only enter the hash when they were observed, which
+	// keeps the fingerprint of a host independent of them.
+	for _, layer := range []struct{ name, hash string }{
+		{"tls", l.TLS},
+		{"headers", l.Headers},
+		{"redirect", l.Redirect},
+		{"dom", l.DOM},
+	} {
+		if layer.hash != "" {
+			d.field(layer.name, layer.hash)
+		}
+	}
 	return d.sum()
 }
 

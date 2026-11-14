@@ -66,8 +66,9 @@ sources:
     enabled: true
 ```
 
-A Cert Spotter API token is optional and is read from the
-`CERTSPOTTER_TOKEN` environment variable.
+A source also accepts `url` to point it at a self-hosted mirror instead of
+the public endpoint. A Cert Spotter API token is optional and is read from
+the `CERTSPOTTER_TOKEN` environment variable.
 
 ## License
 

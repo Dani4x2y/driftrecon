@@ -134,6 +134,37 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
+func TestSourceURL(t *testing.T) {
+	isolateHome(t)
+
+	cfg, err := Load(writeConfig(t, "sources:\n  crtsh:\n    url: https://ct.internal.example/search\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Sources.CrtSh.URL; got != "https://ct.internal.example/search" {
+		t.Errorf("url = %q", got)
+	}
+	if !cfg.Sources.CrtSh.Enabled {
+		t.Error("setting a url must not disable the source")
+	}
+	if cfg.Sources.CertSpotter.URL != "" {
+		t.Errorf("certspotter url = %q, want the built-in endpoint", cfg.Sources.CertSpotter.URL)
+	}
+
+	for _, bad := range []string{
+		"ct.internal.example/search",
+		"ftp://ct.internal.example",
+		"https://",
+		"https://ct.internal.example/?q=1",
+		"https://ct.internal.example/#top",
+	} {
+		body := "sources:\n  certspotter:\n    url: \"" + bad + "\"\n"
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("url %q was accepted", bad)
+		}
+	}
+}
+
 func TestDefaultUserAgentIdentifiesTool(t *testing.T) {
 	ua := Default().UserAgent
 	if !strings.HasPrefix(ua, "driftrecon/") || !strings.Contains(ua, projectURL) {

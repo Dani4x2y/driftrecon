@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -52,6 +53,23 @@ type Sources struct {
 // Source is the configuration shared by all discovery sources.
 type Source struct {
 	Enabled bool `yaml:"enabled"`
+	// URL replaces the public endpoint, for example with a self-hosted
+	// mirror.
+	URL string `yaml:"url"`
+}
+
+func (s Source) validate() error {
+	if s.URL == "" {
+		return nil
+	}
+	u, err := url.Parse(s.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("url %q must be an absolute http or https URL", s.URL)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("url %q must not carry a query or fragment", s.URL)
+	}
+	return nil
 }
 
 // Default returns the built-in settings.
@@ -142,6 +160,12 @@ func (c Config) Validate() error {
 		if _, err := netip.ParseAddrPort(r); err != nil {
 			return fmt.Errorf("config: resolver %q is not an ip:port address", r)
 		}
+	}
+	if err := c.Sources.CrtSh.validate(); err != nil {
+		return fmt.Errorf("config: sources.crtsh: %w", err)
+	}
+	if err := c.Sources.CertSpotter.validate(); err != nil {
+		return fmt.Errorf("config: sources.certspotter: %w", err)
 	}
 	return nil
 }

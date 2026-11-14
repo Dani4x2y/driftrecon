@@ -1,0 +1,19 @@
+# binaries
+/driftrecon
+/driftrecon.exe
+/dist/
+
+# local state
+*.db
+*.db-shm
+*.db-wal
+
+# test and coverage output
+*.test
+*.out
+coverage.html
+
+# editors
+.idea/
+.vscode/
+*.swp

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -291,8 +292,8 @@ func TestSnapshotsAreContentAddressed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created != 2 {
-		t.Errorf("first scan created %d assets, want 2", created)
+	if created[model.KindHost] != 2 {
+		t.Errorf("first scan created %v assets, want 2 hosts", created)
 	}
 
 	later := t0.Add(24 * time.Hour)
@@ -306,8 +307,8 @@ func TestSnapshotsAreContentAddressed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created != 0 {
-		t.Errorf("second scan created %d assets, want 0", created)
+	if len(created) != 0 {
+		t.Errorf("second scan created %v assets, want none", created)
 	}
 
 	if n := count(t, s, "assets"); n != 2 {
@@ -383,8 +384,8 @@ func TestAssetsAreScopedToTarget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if created != 1 {
-			t.Errorf("target %s: created = %d, want 1", target.Name, created)
+		if created[model.KindHost] != 1 {
+			t.Errorf("target %s: created = %v, want 1 host", target.Name, created)
 		}
 	}
 	if n := count(t, s, "assets"); n != 2 {
@@ -392,5 +393,284 @@ func TestAssetsAreScopedToTarget(t *testing.T) {
 	}
 	if n := count(t, s, "blobs"); n != 1 {
 		t.Errorf("blobs = %d, want identical content shared across targets", n)
+	}
+}
+
+func serviceSnapshot(key, host, data string, at time.Time) Snapshot {
+	return Snapshot{
+		Kind:       model.KindService,
+		Key:        key,
+		Host:       host,
+		State:      model.StateLive,
+		FP:         "fp-" + data,
+		FPTLS:      "tls-" + data,
+		FPHeaders:  "headers-" + data,
+		FPRedirect: "redirect-" + data,
+		FPDOM:      "dom-" + data,
+		Data:       []byte(data),
+		ObservedAt: at,
+		Sources:    []string{"probe"},
+		Seen:       true,
+	}
+}
+
+func certificate(digest, cn string) model.Certificate {
+	return model.Certificate{
+		SHA256:     digest,
+		SubjectCN:  cn,
+		IssuerCN:   "R11",
+		IssuerOrg:  "Let's Encrypt",
+		Serial:     "04d2",
+		SANs:       []string{cn, "alt." + cn},
+		SPKISHA256: "spki-" + digest,
+		NotBefore:  t0.AddDate(0, -1, 0),
+		NotAfter:   t0.AddDate(0, 2, 0),
+		KeyAlg:     "ECDSA-P-256",
+	}
+}
+
+func TestServiceSnapshots(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	target := newTarget(t, s, "acme")
+	scan := newScan(t, s, target, t0)
+
+	leaf := certificate("leaf", "www.acme.example")
+	issuer := certificate("issuer", "R11")
+	issuer.IsCA, issuer.SANs = true, nil
+
+	// The top bit is set: the value does not fit a signed integer as is.
+	simhash := model.SimHash(0xfedcba9876543210)
+	favicon := int32(-1874651529)
+
+	secure := serviceSnapshot("https://www.acme.example:443", "www.acme.example", "S1", t0)
+	secure.DOMSimHash, secure.FaviconMMH3 = &simhash, &favicon
+	secure.Certs = []model.Certificate{leaf, issuer}
+
+	alias := serviceSnapshot("https://acme.example:443", "acme.example", "S2", t0)
+	alias.Certs = []model.Certificate{leaf, issuer}
+
+	plain := serviceSnapshot("http://www.acme.example:80", "www.acme.example", "S3", t0)
+	plain.FPTLS = ""
+
+	created, err := s.SaveSnapshots(ctx, scan, []Snapshot{
+		hostSnapshot("www.acme.example", "H1", t0),
+		hostSnapshot("acme.example", "H2", t0),
+		secure, alias, plain,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created[model.KindHost] != 2 || created[model.KindService] != 3 {
+		t.Errorf("created = %v, want 2 hosts and 3 services", created)
+	}
+	if n := count(t, s, "certificates"); n != 2 {
+		t.Errorf("certificates = %d, want each stored once", n)
+	}
+
+	snaps, err := s.HostSnapshots(ctx, scan.ID, "www.acme.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 3 || snaps[0].Kind != model.KindHost || snaps[1].Key != plain.Key || snaps[2].Key != secure.Key {
+		t.Fatalf("snapshots of the host = %+v, want the host followed by its services", snaps)
+	}
+
+	host, gotPlain, gotSecure := snaps[0], snaps[1], snaps[2]
+	if gotSecure.FP != "fp-S1" || gotSecure.FPTLS != "tls-S1" || gotSecure.FPHeaders != "headers-S1" ||
+		gotSecure.FPRedirect != "redirect-S1" || gotSecure.FPDOM != "dom-S1" || gotSecure.FPDNS != "" {
+		t.Errorf("fingerprints = %+v", gotSecure)
+	}
+	if gotSecure.DOMSimHash == nil || *gotSecure.DOMSimHash != simhash {
+		t.Errorf("simhash = %v, want %v", gotSecure.DOMSimHash, simhash)
+	}
+	if gotSecure.FaviconMMH3 == nil || *gotSecure.FaviconMMH3 != favicon {
+		t.Errorf("favicon = %v, want %d", gotSecure.FaviconMMH3, favicon)
+	}
+	if gotSecure.CertSHA256 != "leaf" || !slices.Equal(gotSecure.Sources, []string{"probe"}) || gotSecure.Host != "www.acme.example" {
+		t.Errorf("secure service = %+v", gotSecure)
+	}
+	if gotPlain.CertSHA256 != "" || gotPlain.DOMSimHash != nil || gotPlain.FaviconMMH3 != nil || gotPlain.FPTLS != "" {
+		t.Errorf("plain service = %+v, want no certificate and no optional values", gotPlain)
+	}
+	if host.FPDNS != "dns-H1" || host.FPTLS != "" || host.CertSHA256 != "" {
+		t.Errorf("host = %+v", host)
+	}
+
+	all, err := s.Snapshots(ctx, scan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := make([]model.AssetKind, len(all))
+	for i, snap := range all {
+		kinds[i] = snap.Kind
+	}
+	want := []model.AssetKind{model.KindHost, model.KindHost, model.KindService, model.KindService, model.KindService}
+	if !slices.Equal(kinds, want) {
+		t.Errorf("kinds = %v, want hosts before services", kinds)
+	}
+
+	keys, err := s.AssetKeys(ctx, target.ID, model.KindService)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{plain.Key, alias.Key, secure.Key}; !slices.Equal(keys, want) {
+		t.Errorf("service keys = %v, want %v", keys, want)
+	}
+}
+
+func TestCertificates(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	scan := newScan(t, s, newTarget(t, s, "acme"), t0)
+
+	leaf := certificate("leaf", "www.acme.example")
+	root := certificate("root", "Example Root")
+	root.IsCA, root.SelfSigned, root.SANs, root.IssuerOrg = true, true, nil, ""
+
+	snap := serviceSnapshot("https://www.acme.example:443", "www.acme.example", "S1", t0)
+	snap.Certs = []model.Certificate{leaf, root}
+	if _, err := s.SaveSnapshots(ctx, scan, []Snapshot{snap}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Certificates(ctx, "leaf", "root", "unknown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("certificates = %v, want the two on record", got)
+	}
+
+	l := got["leaf"]
+	if l.SubjectCN != leaf.SubjectCN || l.IssuerCN != leaf.IssuerCN || l.IssuerOrg != leaf.IssuerOrg || l.Serial != leaf.Serial ||
+		!slices.Equal(l.SANs, leaf.SANs) || l.SPKISHA256 != leaf.SPKISHA256 || l.KeyAlg != leaf.KeyAlg ||
+		!l.NotBefore.Equal(leaf.NotBefore) || !l.NotAfter.Equal(leaf.NotAfter) || l.IsCA || l.SelfSigned {
+		t.Errorf("leaf = %+v\nwant   %+v", l, leaf)
+	}
+	if r := got["root"]; !r.IsCA || !r.SelfSigned || r.SANs != nil || r.IssuerOrg != "" {
+		t.Errorf("root = %+v", r)
+	}
+
+	none, err := s.Certificates(ctx)
+	if err != nil || len(none) != 0 {
+		t.Errorf("no digests: %v, %v", none, err)
+	}
+}
+
+func TestTargetsWithHost(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+
+	for _, name := range []string{"zeta", "acme"} {
+		target := newTarget(t, s, name)
+		scan := newScan(t, s, target, t0)
+		batch := []Snapshot{
+			hostSnapshot("shared.example", "H", t0),
+			serviceSnapshot("https://shared.example:443", "shared.example", "S", t0),
+		}
+		if name == "acme" {
+			batch = append(batch, hostSnapshot("only.acme.example", "O", t0))
+		}
+		if _, err := s.SaveSnapshots(ctx, scan, batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := map[string][]string{
+		"shared.example":    {"acme", "zeta"},
+		"only.acme.example": {"acme"},
+		"unknown.example":   nil,
+	}
+	for host, want := range cases {
+		got, err := s.TargetsWithHost(ctx, host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: targets = %v, want %v", host, got, want)
+		}
+	}
+}
+
+// A database written under the first schema has to open under the current
+// one with everything it held intact.
+func TestUpgradeFromFirstSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", path+"?_foreign_keys=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		migrations[0].sql,
+		`PRAGMA user_version = 1`,
+		`INSERT INTO targets (id, name, roots, scope, authorized_at, created_at)
+		 VALUES (1, 'acme', '["acme.example"]', '{}', '2026-03-01T12:00:00Z', '2026-03-01T12:00:00Z')`,
+		`INSERT INTO scans (id, target_id, profile, status, config_hash, fp_version, started_at, finished_at, stats)
+		 VALUES (1, 1, 'standard', 'completed', 'cfg', 1, '2026-03-01T12:00:00Z', '2026-03-01T12:01:00Z', '{"hosts":1}')`,
+		`INSERT INTO assets (id, target_id, kind, key, host, first_seen_at, last_seen_at)
+		 VALUES (1, 1, 'host', 'www.acme.example', 'www.acme.example', '2026-03-01T12:00:00Z', '2026-03-01T12:00:00Z')`,
+		`INSERT INTO blobs (hash, data) VALUES ('h1', '{"host":"www.acme.example"}')`,
+		`INSERT INTO snapshots (scan_id, asset_id, state, fp, fp_dns, blob_hash, observed_at)
+		 VALUES (1, 1, 'live', 'fp-old', 'dns-old', 'h1', '2026-03-01T12:00:30Z')`,
+	} {
+		if _, err := db.ExecContext(t.Context(), stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s := openStore(t, path)
+	ctx := t.Context()
+
+	version, err := s.schemaVersion(ctx, s.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := migrations[len(migrations)-1].version; version != want {
+		t.Errorf("schema version = %d, want %d", version, want)
+	}
+
+	target, err := s.GetTarget(ctx, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, err := s.LatestScan(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Stats.Hosts != 1 {
+		t.Errorf("stats = %+v", scan.Stats)
+	}
+
+	snaps, err := s.Snapshots(ctx, scan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 1 {
+		t.Fatalf("snapshots = %+v", snaps)
+	}
+	old := snaps[0]
+	if old.FP != "fp-old" || old.FPDNS != "dns-old" || string(old.Data) != `{"host":"www.acme.example"}` {
+		t.Errorf("snapshot = %+v, want the stored values", old)
+	}
+	if old.FPTLS != "" || old.FPHeaders != "" || old.FPRedirect != "" || old.FPDOM != "" ||
+		old.DOMSimHash != nil || old.FaviconMMH3 != nil || old.CertSHA256 != "" {
+		t.Errorf("snapshot = %+v, want the new columns empty", old)
+	}
+
+	// The upgraded database accepts what the current schema adds.
+	next := newScan(t, s, target, t0.Add(time.Hour))
+	snap := serviceSnapshot("https://www.acme.example:443", "www.acme.example", "S1", t0.Add(time.Hour))
+	snap.Certs = []model.Certificate{certificate("leaf", "www.acme.example")}
+	if _, err := s.SaveSnapshots(ctx, next, []Snapshot{snap}); err != nil {
+		t.Fatal(err)
 	}
 }

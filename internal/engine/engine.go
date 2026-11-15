@@ -198,7 +198,7 @@ func (e *Engine) run(ctx context.Context, sc *scope.Scope, scan *storage.Scan) (
 		if err != nil {
 			return err
 		}
-		stats.NewAssets += created
+		stats.NewAssets += created[model.KindHost]
 		for _, snap := range batch {
 			stats.States[snap.State]++
 		}

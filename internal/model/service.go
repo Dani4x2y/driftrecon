@@ -85,7 +85,7 @@ type Headers struct {
 	// Names are the header names as the server spelled them, in the order
 	// they were sent, each listed once. They are sorted instead when the
 	// order itself turned out to be volatile.
-	Names []string `json:"names"`
+	Names []string `json:"names,omitempty"`
 	// Values holds the normalised values of the headers that identify the
 	// server stack or define a security policy, keyed by lower-case name.
 	Values  map[string]string `json:"values,omitempty"`

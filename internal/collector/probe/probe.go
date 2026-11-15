@@ -1,5 +1,7 @@
 // Package probe examines HTTP services: it completes a TLS handshake,
-// sends plain GET requests and records what the server reveals about itself.
+// requests the front page and records what the server reveals about itself.
+// It only ever asks for the front page, the pages that one redirects to on
+// the same service, and the favicon.
 package probe
 
 import (
@@ -18,9 +20,11 @@ import (
 )
 
 const (
-	defaultTimeout  = 10 * time.Second
-	defaultMaxBody  = 2 << 20
-	defaultHostRate = 2
+	defaultTimeout      = 10 * time.Second
+	defaultMaxBody      = 2 << 20
+	defaultMaxRedirects = 10
+	defaultSamples      = 2
+	defaultHostRate     = 2
 
 	// maxConnectTimeout bounds the TCP handshake on its own. A filtered port
 	// swallows the SYN, and waiting out a full request timeout for each one
@@ -49,6 +53,12 @@ type Options struct {
 	// MaxBody is how many bytes of a response body are read. It defaults to
 	// 2 MiB.
 	MaxBody int64
+	// MaxRedirects is how many redirects are followed within one service.
+	// It defaults to 10.
+	MaxRedirects int
+	// Samples is how many times the front page is requested to tell stable
+	// features from volatile ones. It defaults to 2.
+	Samples int
 	// Limiter, when set, is consulted before every connection, across all
 	// hosts.
 	Limiter Limiter
@@ -71,6 +81,8 @@ type Prober struct {
 	timeout        time.Duration
 	connectTimeout time.Duration
 	maxBody        int64
+	maxRedirects   int
+	samples        int
 	limiter        Limiter
 	hostRate       rate.Limit
 	allowPrivate   bool
@@ -92,6 +104,12 @@ func New(o Options) (*Prober, error) {
 	if o.MaxBody <= 0 {
 		o.MaxBody = defaultMaxBody
 	}
+	if o.MaxRedirects <= 0 {
+		o.MaxRedirects = defaultMaxRedirects
+	}
+	if o.Samples <= 0 {
+		o.Samples = defaultSamples
+	}
 	if o.HostRate <= 0 {
 		o.HostRate = defaultHostRate
 	}
@@ -103,6 +121,8 @@ func New(o Options) (*Prober, error) {
 		timeout:        o.Timeout,
 		connectTimeout: min(o.Timeout, maxConnectTimeout),
 		maxBody:        o.MaxBody,
+		maxRedirects:   o.MaxRedirects,
+		samples:        o.Samples,
 		limiter:        o.Limiter,
 		hostRate:       rate.Limit(o.HostRate),
 		allowPrivate:   o.AllowPrivate,
@@ -146,6 +166,14 @@ func fail(reason string, err error) error {
 		reason = ReasonTimeout
 	}
 	return &failure{reason: reason, err: err}
+}
+
+func reasonOf(err error) string {
+	var f *failure
+	if errors.As(err, &f) {
+		return f.reason
+	}
+	return ReasonConnect
 }
 
 // origin identifies a service.

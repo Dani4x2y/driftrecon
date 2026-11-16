@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dani4x2y/driftrecon/internal/collector"
 	"github.com/Dani4x2y/driftrecon/internal/collector/ctlog"
+	"github.com/Dani4x2y/driftrecon/internal/collector/probe"
 	"github.com/Dani4x2y/driftrecon/internal/collector/resolve"
 	"github.com/Dani4x2y/driftrecon/internal/config"
 	"github.com/Dani4x2y/driftrecon/internal/engine"
@@ -22,14 +23,22 @@ import (
 // timeFormat is used wherever a timestamp is shown to a person.
 const timeFormat = "2006-01-02 15:04 MST"
 
-// hostStates lists the states in the order they are reported.
-var hostStates = []model.State{
-	model.StateLive,
-	model.StateWildcard,
-	model.StateUnresolved,
-	model.StateDiscovered,
-	model.StateError,
-}
+// hostStates and serviceStates list the states an asset of each kind can be
+// in, in the order they are reported.
+var (
+	hostStates = []model.State{
+		model.StateLive,
+		model.StateWildcard,
+		model.StateUnresolved,
+		model.StateDiscovered,
+		model.StateError,
+	}
+	serviceStates = []model.State{
+		model.StateLive,
+		model.StateUnreachable,
+		model.StateError,
+	}
+)
 
 func newScanCmd(a *app) *cobra.Command {
 	var (
@@ -45,7 +54,11 @@ func newScanCmd(a *app) *cobra.Command {
 
 Profiles:
   passive   query Certificate Transparency only; nothing is sent to the target
-  standard  additionally resolve every discovered name`,
+  standard  additionally resolve every discovered name and request the front
+            page of the web services on it
+
+A standard scan asks each service for its front page, the pages that one
+redirects to on the same service, and the favicon. Nothing else is requested.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prof, err := model.ParseProfile(profile)
@@ -125,29 +138,56 @@ func newEngine(cfg config.Config, store *storage.Store, profile model.Profile, l
 		}))
 	}
 
-	var resolver *resolve.Resolver
+	var (
+		resolver  *resolve.Resolver
+		prober    *probe.Prober
+		endpoints []engine.Endpoint
+	)
 	if profile != model.ProfilePassive {
-		// A burst of a tenth of a second keeps workers from queueing behind
-		// timer granularity without letting the rate overshoot noticeably.
-		limiter := rate.NewLimiter(rate.Limit(cfg.Rate), max(1, int(cfg.Rate/10)))
-
 		var err error
 		resolver, err = resolve.New(resolve.Options{
 			Servers: cfg.Resolvers,
 			Timeout: cfg.Timeout,
-			Limiter: limiter,
+			Limiter: newLimiter(cfg.Rate),
 		})
 		if err != nil {
 			return nil, err
 		}
+
+		for _, port := range cfg.Probe.HTTPPorts {
+			endpoints = append(endpoints, engine.Endpoint{Scheme: "http", Port: uint16(port)})
+		}
+		for _, port := range cfg.Probe.HTTPSPorts {
+			endpoints = append(endpoints, engine.Endpoint{Scheme: "https", Port: uint16(port)})
+		}
+		if len(endpoints) > 0 {
+			prober, err = probe.New(probe.Options{
+				UserAgent:    cfg.UserAgent,
+				Timeout:      cfg.Probe.Timeout,
+				Limiter:      newLimiter(cfg.Probe.Rate),
+				HostRate:     cfg.Probe.HostRate,
+				AllowPrivate: cfg.Probe.AllowPrivate,
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
-	return engine.New(store, sources, resolver, nil, engine.Options{
+	return engine.New(store, sources, resolver, prober, engine.Options{
 		Profile:     profile,
 		Concurrency: cfg.Concurrency,
 		MaxHosts:    cfg.MaxHosts,
+		Endpoints:   endpoints,
 		Logger:      log,
 	})
+}
+
+// newLimiter allows perSecond events per second. A burst of a tenth of a
+// second keeps workers from queueing behind timer granularity without
+// letting the rate overshoot noticeably.
+func newLimiter(perSecond float64) *rate.Limiter {
+	return rate.NewLimiter(rate.Limit(perSecond), max(1, int(perSecond/10)))
 }
 
 func printScanSummary(w io.Writer, target *storage.Target, scan *storage.Scan) error {
@@ -162,6 +202,14 @@ func printScanSummary(w io.Writer, target *storage.Target, scan *storage.Scan) e
 	for _, state := range hostStates {
 		if n := scan.Stats.States[state]; n > 0 {
 			b = fmt.Appendf(b, "    %-11s %d\n", state, n)
+		}
+	}
+	if scan.Stats.Services > 0 {
+		b = fmt.Appendf(b, "  services: %d recorded, %d new\n", scan.Stats.Services, scan.Stats.NewServices)
+		for _, state := range serviceStates {
+			if n := scan.Stats.ServiceStates[state]; n > 0 {
+				b = fmt.Appendf(b, "    %-11s %d\n", state, n)
+			}
 		}
 	}
 	for _, src := range scan.Stats.Sources {

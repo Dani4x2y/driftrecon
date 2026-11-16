@@ -3,8 +3,11 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,11 +20,17 @@ type app struct {
 	configPath string
 	dbPath     string
 	verbosity  int
+	// now is the clock behind everything shown relative to the present,
+	// such as the days a certificate has left.
+	now func() time.Time
 }
 
 // New builds the root command.
 func New() *cobra.Command {
-	a := &app{}
+	return newRoot(&app{now: time.Now})
+}
+
+func newRoot(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "driftrecon",
 		Short: "Differential attack surface monitoring",
@@ -42,6 +51,7 @@ Use it only against assets you own or are explicitly authorised to assess.`,
 		newTargetCmd(a),
 		newScanCmd(a),
 		newAssetsCmd(a),
+		newShowCmd(a),
 		newVersionCmd(),
 	)
 	return root
@@ -70,6 +80,19 @@ func (a *app) open(ctx context.Context) (config.Config, *storage.Store, error) {
 		return config.Config{}, nil, err
 	}
 	return cfg, store, nil
+}
+
+// selectScan returns the scan a listing is about: the one with the given id
+// when the --scan flag was set, the latest completed one otherwise.
+func selectScan(cmd *cobra.Command, store *storage.Store, target *storage.Target, id int64) (*storage.Scan, error) {
+	if cmd.Flags().Changed("scan") {
+		return store.GetScan(cmd.Context(), target.ID, id)
+	}
+	scan, err := store.LatestScan(cmd.Context(), target.ID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, fmt.Errorf("target %q has no completed scan yet, run: driftrecon scan %s", target.Name, target.Name)
+	}
+	return scan, err
 }
 
 func (a *app) logger(w io.Writer) *slog.Logger {

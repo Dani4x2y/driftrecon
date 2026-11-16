@@ -23,6 +23,8 @@ type env struct {
 	t      *testing.T
 	db     string
 	config string
+	// now pins the clock of the commands. The zero value leaves it running.
+	now time.Time
 }
 
 func newEnv(t *testing.T) *env {
@@ -63,7 +65,11 @@ func assertContains(t *testing.T, out string, wants ...string) {
 func (e *env) run(args ...string) (string, error) {
 	e.t.Helper()
 	var out bytes.Buffer
-	cmd := New()
+	a := &app{now: time.Now}
+	if !e.now.IsZero() {
+		a.now = func() time.Time { return e.now }
+	}
+	cmd := newRoot(a)
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetArgs(append([]string{"--db", e.db, "--config", e.config}, args...))

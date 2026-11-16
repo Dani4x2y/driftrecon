@@ -3,7 +3,6 @@ package cli
 import (
 	"cmp"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -20,23 +19,39 @@ import (
 func newAssetsCmd(a *app) *cobra.Command {
 	var (
 		scanID int64
+		kind   string
 		states []string
 	)
 	cmd := &cobra.Command{
 		Use:   "assets <target>",
-		Short: "List the hosts recorded by a scan",
-		Long: `List the hosts recorded by a scan, by default the latest completed one.
+		Short: "List the hosts or services recorded by a scan",
+		Long: `List what a scan recorded, by default the hosts of the latest completed
+scan. With --kind service the web services found on them are listed instead.
 
-States:
-  live        resolves to at least one address
-  wildcard    resolves only because of a wildcard record
-  unresolved  does not exist or has no address records
-  discovered  reported by a source, not resolved (passive scans)
-  error       the lookup failed, nothing is known for this scan`,
+Host states:
+  live         resolves to at least one address
+  wildcard     resolves only because of a wildcard record
+  unresolved   does not exist or has no address records
+  discovered   reported by a source, not resolved (passive scans)
+  error        the lookup failed, nothing is known for this scan
+
+Service states:
+  live         answered
+  unreachable  answered in an earlier scan, but not in this one
+  error        could not be examined, nothing is known for this scan`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			filter, err := parseStates(states)
+
+			valid := hostStates
+			switch model.AssetKind(kind) {
+			case model.KindHost:
+			case model.KindService:
+				valid = serviceStates
+			default:
+				return fmt.Errorf("unknown kind %q (want %s or %s)", kind, model.KindHost, model.KindService)
+			}
+			filter, err := parseStates(states, valid)
 			if err != nil {
 				return err
 			}
@@ -51,57 +66,77 @@ States:
 			if err != nil {
 				return err
 			}
-
-			var scan *storage.Scan
-			if cmd.Flags().Changed("scan") {
-				scan, err = store.GetScan(ctx, target.ID, scanID)
-			} else {
-				scan, err = store.LatestScan(ctx, target.ID)
-				if errors.Is(err, storage.ErrNotFound) {
-					return fmt.Errorf("target %q has no completed scan yet, run: driftrecon scan %s", target.Name, target.Name)
-				}
-			}
+			scan, err := selectScan(cmd, store, target, scanID)
 			if err != nil {
 				return err
 			}
-
 			snaps, err := store.Snapshots(ctx, scan.ID)
 			if err != nil {
 				return err
 			}
-			return renderAssets(cmd.OutOrStdout(), target, scan, snaps, filter)
+
+			if model.AssetKind(kind) == model.KindHost {
+				return renderHosts(cmd.OutOrStdout(), target, scan, snaps, filter)
+			}
+
+			var digests []string
+			for _, snap := range snaps {
+				if snap.CertSHA256 != "" {
+					digests = append(digests, snap.CertSHA256)
+				}
+			}
+			slices.Sort(digests)
+			certs, err := store.Certificates(ctx, slices.Compact(digests)...)
+			if err != nil {
+				return err
+			}
+			return renderServices(cmd.OutOrStdout(), target, scan, snaps, certs, filter)
 		},
 	}
 
 	flags := cmd.Flags()
 	flags.Int64Var(&scanID, "scan", 0, "scan to show (default: latest completed scan)")
-	flags.StringSliceVar(&states, "state", nil, "only show hosts in this state (repeatable)")
+	flags.StringVar(&kind, "kind", string(model.KindHost), "what to list: host or service")
+	flags.StringSliceVar(&states, "state", nil, "only show assets in this state (repeatable)")
 	return cmd
 }
 
-func parseStates(names []string) (map[model.State]bool, error) {
+func parseStates(names []string, valid []model.State) (map[model.State]bool, error) {
 	filter := make(map[model.State]bool, len(names))
 	for _, name := range names {
 		state := model.State(strings.ToLower(name))
-		if !slices.Contains(hostStates, state) {
-			valid := make([]string, len(hostStates))
-			for i, s := range hostStates {
-				valid[i] = string(s)
+		if !slices.Contains(valid, state) {
+			options := make([]string, len(valid))
+			for i, s := range valid {
+				options[i] = string(s)
 			}
-			return nil, fmt.Errorf("unknown state %q (want one of: %s)", name, strings.Join(valid, ", "))
+			return nil, fmt.Errorf("unknown state %q (want one of: %s)", name, strings.Join(options, ", "))
 		}
 		filter[state] = true
 	}
 	return filter, nil
 }
 
-func renderAssets(w io.Writer, target *storage.Target, scan *storage.Scan, snaps []storage.AssetSnapshot, filter map[model.State]bool) error {
-	slices.SortFunc(snaps, func(a, b storage.AssetSnapshot) int {
+func renderHosts(w io.Writer, target *storage.Target, scan *storage.Scan, snaps []storage.AssetSnapshot, filter map[model.State]bool) error {
+	var hosts []storage.AssetSnapshot
+	services := make(map[string][]string)
+	for _, snap := range snaps {
+		if snap.Kind != model.KindService {
+			hosts = append(hosts, snap)
+			continue
+		}
+		obs, err := decodeService(snap)
+		if err != nil {
+			return err
+		}
+		services[snap.Host] = append(services[snap.Host], serviceLabel(snap, obs))
+	}
+	slices.SortFunc(hosts, func(a, b storage.AssetSnapshot) int {
 		return cmp.Compare(domainKey(a.Host), domainKey(b.Host))
 	})
 
-	table := report.Table{Header: []string{"HOST", "STATE", "ADDRESSES", "CNAME", "SOURCES", "FIRST SEEN"}}
-	for _, snap := range snaps {
+	table := report.Table{Header: []string{"HOST", "STATE", "ADDRESSES", "CNAME", "SERVICES", "SOURCES", "FIRST SEEN"}}
+	for _, snap := range hosts {
 		if len(filter) > 0 && !filter[snap.State] {
 			continue
 		}
@@ -122,13 +157,62 @@ func renderAssets(w io.Writer, target *storage.Target, scan *storage.Scan, snaps
 			string(snap.State),
 			addrs,
 			cname,
+			strings.Join(services[snap.Host], ", "),
 			strings.Join(snap.Sources, ","),
 			snap.FirstSeenAt.Format(time.DateOnly),
 		})
 	}
+	return renderListing(w, target, scan, table, len(hosts), "hosts")
+}
 
-	_, err := fmt.Fprintf(w, "scan #%d of %s (%s, %s): %d of %d hosts\n",
-		scan.ID, target.Name, scan.Profile, scan.StartedAt.Format(timeFormat), len(table.Rows), len(snaps))
+func renderServices(w io.Writer, target *storage.Target, scan *storage.Scan, snaps []storage.AssetSnapshot, certs map[string]model.Certificate, filter map[model.State]bool) error {
+	var services []storage.AssetSnapshot
+	for _, snap := range snaps {
+		if snap.Kind == model.KindService {
+			services = append(services, snap)
+		}
+	}
+	slices.SortFunc(services, func(a, b storage.AssetSnapshot) int {
+		return cmp.Or(cmp.Compare(domainKey(a.Host), domainKey(b.Host)), cmp.Compare(a.Key, b.Key))
+	})
+
+	table := report.Table{Header: []string{"SERVICE", "STATE", "RESPONSE", "TITLE", "SERVER", "CERT EXPIRES", "FIRST SEEN"}}
+	for _, snap := range services {
+		if len(filter) > 0 && !filter[snap.State] {
+			continue
+		}
+		obs, err := decodeService(snap)
+		if err != nil {
+			return err
+		}
+
+		var title, server, expires string
+		if obs.Page != nil {
+			title = shorten(obs.Page.Title, 40)
+		}
+		if obs.Headers != nil {
+			server = shorten(obs.Headers.Values["server"], 30)
+		}
+		if cert, ok := certs[snap.CertSHA256]; ok {
+			expires = cert.NotAfter.Format(time.DateOnly)
+		}
+		table.Rows = append(table.Rows, []string{
+			displayURL(snap.Key),
+			string(snap.State),
+			responseSummary(obs),
+			title,
+			server,
+			expires,
+			snap.FirstSeenAt.Format(time.DateOnly),
+		})
+	}
+	return renderListing(w, target, scan, table, len(services), "services")
+}
+
+// renderListing prints the header line of a listing followed by its table.
+func renderListing(w io.Writer, target *storage.Target, scan *storage.Scan, table report.Table, total int, noun string) error {
+	_, err := fmt.Fprintf(w, "scan #%d of %s (%s, %s): %d of %d %s\n",
+		scan.ID, target.Name, scan.Profile, scan.StartedAt.Format(timeFormat), len(table.Rows), total, noun)
 	if err != nil || len(table.Rows) == 0 {
 		return err
 	}

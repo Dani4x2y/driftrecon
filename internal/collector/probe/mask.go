@@ -7,9 +7,9 @@ import (
 
 var uuidPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 
-// maskIDs replaces the parts of s that look machine-generated with "*", so
-// that a session id, a cache node name or a content hash does not make two
-// otherwise equal values differ. With numbers set, plain numbers are masked
+// maskIDs replaces the parts of s that look like identifiers made up by a
+// machine with "*", so that a session id, a cache node name or a content
+// hash does not make two otherwise equal values differ. With numbers set, plain numbers are masked
 // as well: they are identifiers in a path (/orders/1042) but carry meaning
 // in a product banner (nginx/1.24.0).
 //

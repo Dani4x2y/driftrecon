@@ -236,10 +236,10 @@ func TestScanLifecycle(t *testing.T) {
 	}
 
 	stats := model.ScanStats{
-		Hosts:     3,
-		States:    map[model.State]int{model.StateLive: 2, model.StateUnresolved: 1},
-		NewAssets: 3,
-		Sources:   []model.SourceStat{{Source: "crtsh", Domain: "acme.example", Names: 3}},
+		Hosts:    3,
+		States:   map[model.State]int{model.StateLive: 2, model.StateUnresolved: 1},
+		NewHosts: 3,
+		Sources:  []model.SourceStat{{Source: "crtsh", Domain: "acme.example", Names: 3}},
 	}
 	if err := s.FinishScan(ctx, first, ScanCompleted, stats, t0.Add(time.Minute)); err != nil {
 		t.Fatal(err)

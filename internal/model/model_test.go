@@ -14,6 +14,20 @@ func TestServiceKey(t *testing.T) {
 	}
 }
 
+func TestParseServiceKey(t *testing.T) {
+	scheme, host, port, ok := ParseServiceKey(ServiceKey("https", "api.example.com", 8443))
+	if !ok || scheme != "https" || host != "api.example.com" || port != 8443 {
+		t.Errorf("round trip = %q, %q, %d, %v", scheme, host, port, ok)
+	}
+
+	for _, bad := range []string{"", "api.example.com", "https://api.example.com", "https://:443", "://a:1",
+		"https://api.example.com:http", "https://api.example.com:70000", "https://api.example.com:-1"} {
+		if _, _, _, ok := ParseServiceKey(bad); ok {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}
+
 func TestSimHashIsStoredAsHexText(t *testing.T) {
 	// The value does not fit a signed 64-bit integer nor a float64, which is
 	// what a JSON number would be read back as.

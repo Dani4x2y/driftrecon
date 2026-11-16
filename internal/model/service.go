@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,20 @@ const KindService AssetKind = "service"
 // out, so that a key names exactly one endpoint.
 func ServiceKey(scheme, host string, port uint16) string {
 	return fmt.Sprintf("%s://%s:%d", scheme, host, port)
+}
+
+// ParseServiceKey splits a key built by ServiceKey.
+func ParseServiceKey(key string) (scheme, host string, port uint16, ok bool) {
+	scheme, rest, found := strings.Cut(key, "://")
+	i := strings.LastIndexByte(rest, ':')
+	if !found || scheme == "" || i <= 0 {
+		return "", "", 0, false
+	}
+	n, err := strconv.ParseUint(rest[i+1:], 10, 16)
+	if err != nil {
+		return "", "", 0, false
+	}
+	return scheme, rest[:i], uint16(n), true
 }
 
 // ServiceObservation is what one scan learned about an HTTP service. Its

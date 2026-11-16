@@ -16,6 +16,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/Dani4x2y/driftrecon/internal/collector"
+	"github.com/Dani4x2y/driftrecon/internal/collector/probe"
 	"github.com/Dani4x2y/driftrecon/internal/collector/resolve"
 	"github.com/Dani4x2y/driftrecon/internal/dnstest"
 	"github.com/Dani4x2y/driftrecon/internal/model"
@@ -52,6 +53,9 @@ type fixture struct {
 	zone   *dnstest.Zone
 	dns    *dnstest.Server
 	clock  time.Time
+	// prober is handed to every engine the fixture builds. It is nil
+	// unless a test sets it.
+	prober *probe.Prober
 }
 
 func newFixture(t *testing.T, rules scope.Rules, records ...string) *fixture {
@@ -97,7 +101,7 @@ func (f *fixture) engine(profile model.Profile, opts Options, sources ...collect
 	}
 	opts.Now = func() time.Time { return f.clock }
 
-	e, err := New(f.store, sources, resolver, opts)
+	e, err := New(f.store, sources, resolver, f.prober, opts)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -237,8 +241,8 @@ func TestScanClassifiesHosts(t *testing.T) {
 	}
 
 	stats := scan.Stats
-	if stats.Hosts != 7 || stats.NewAssets != 7 {
-		t.Errorf("hosts = %d, new = %d, want 7 and 7", stats.Hosts, stats.NewAssets)
+	if stats.Hosts != 7 || stats.NewHosts != 7 {
+		t.Errorf("hosts = %d, new = %d, want 7 and 7", stats.Hosts, stats.NewHosts)
 	}
 	wantStates := map[model.State]int{
 		model.StateLive:       3,
@@ -259,7 +263,7 @@ func TestPassiveScanSendsNoQueries(t *testing.T) {
 	f := newFixture(t, scope.Rules{Roots: []string{"example.test"}}, "www.example.test. 60 IN A 192.0.2.10")
 	src := source("crtsh", "example.test", "www.example.test", "api.example.test")
 
-	e, err := New(f.store, []collector.Source{src}, nil, Options{
+	e, err := New(f.store, []collector.Source{src}, nil, nil, Options{
 		Profile:     model.ProfilePassive,
 		Concurrency: 2,
 		MaxHosts:    10,
@@ -305,8 +309,8 @@ func TestKnownHostsSurviveSourceOutage(t *testing.T) {
 	scan := f.scan(e)
 	second := f.snapshots(scan)
 
-	if len(second) != 3 || scan.Stats.Hosts != 3 || scan.Stats.NewAssets != 0 {
-		t.Fatalf("second scan covered %d hosts (%d new), want the same 3", len(second), scan.Stats.NewAssets)
+	if len(second) != 3 || scan.Stats.Hosts != 3 || scan.Stats.NewHosts != 0 {
+		t.Fatalf("second scan covered %d hosts (%d new), want the same 3", len(second), scan.Stats.NewHosts)
 	}
 	if got := scan.Stats.Sources; len(got) != 1 || got[0].Error == "" || got[0].Names != 0 {
 		t.Errorf("source stats = %+v, want the outage on record", got)
@@ -345,8 +349,8 @@ func TestScanCountsNewAssets(t *testing.T) {
 	src.names["example.test"] = []string{"www.example.test", "staging.example.test"}
 	scan := f.scan(e)
 
-	if scan.Stats.NewAssets != 1 {
-		t.Errorf("new assets = %d, want 1", scan.Stats.NewAssets)
+	if scan.Stats.NewHosts != 1 {
+		t.Errorf("new hosts = %d, want 1", scan.Stats.NewHosts)
 	}
 	staging := f.snapshots(scan)["staging.example.test"]
 	if staging.State != model.StateLive || !staging.FirstSeenAt.Equal(f.clock) {
@@ -487,7 +491,7 @@ func TestLargeScanIsWrittenInBatches(t *testing.T) {
 	for _, n := range scan.Stats.States {
 		total += n
 	}
-	if total != want || scan.Stats.NewAssets != want {
+	if total != want || scan.Stats.NewHosts != want {
 		t.Errorf("stats = %+v, want %d hosts counted", scan.Stats, want)
 	}
 	if live := scan.Stats.States[model.StateLive]; live != (len(names)+2)/3+1 {
@@ -513,7 +517,7 @@ func TestNewValidatesOptions(t *testing.T) {
 		"negative host limit": {resolver, Options{Profile: model.ProfilePassive, Concurrency: 1, MaxHosts: -1}},
 	}
 	for name, tc := range cases {
-		if _, err := New(f.store, nil, tc.resolver, tc.opts); err == nil {
+		if _, err := New(f.store, nil, tc.resolver, nil, tc.opts); err == nil {
 			t.Errorf("%s: New succeeded, want error", name)
 		}
 	}

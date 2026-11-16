@@ -10,7 +10,8 @@ type Profile string
 const (
 	// ProfilePassive queries third-party sources only.
 	ProfilePassive Profile = "passive"
-	// ProfileStandard additionally resolves discovered names.
+	// ProfileStandard additionally resolves discovered names and requests
+	// the front page of the web services found on them.
 	ProfileStandard Profile = "standard"
 )
 
@@ -67,11 +68,16 @@ type DNS struct {
 
 // ScanStats summarises a finished scan.
 type ScanStats struct {
-	Hosts     int           `json:"hosts"`
-	States    map[State]int `json:"states,omitempty"`
-	NewAssets int           `json:"new_assets"`
-	Sources   []SourceStat  `json:"sources,omitempty"`
-	Reason    string        `json:"reason,omitempty"`
+	Hosts    int           `json:"hosts"`
+	States   map[State]int `json:"states,omitempty"`
+	NewHosts int           `json:"new_hosts"`
+	// Services counts the services that were recorded, which leaves out
+	// ports where nothing has ever answered.
+	Services      int           `json:"services"`
+	ServiceStates map[State]int `json:"service_states,omitempty"`
+	NewServices   int           `json:"new_services"`
+	Sources       []SourceStat  `json:"sources,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
 }
 
 // SourceStat records how one discovery source performed for one root domain.

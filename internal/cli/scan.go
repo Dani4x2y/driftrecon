@@ -142,7 +142,7 @@ func newEngine(cfg config.Config, store *storage.Store, profile model.Profile, l
 		}
 	}
 
-	return engine.New(store, sources, resolver, engine.Options{
+	return engine.New(store, sources, resolver, nil, engine.Options{
 		Profile:     profile,
 		Concurrency: cfg.Concurrency,
 		MaxHosts:    cfg.MaxHosts,
@@ -158,7 +158,7 @@ func printScanSummary(w io.Writer, target *storage.Target, scan *storage.Scan) e
 		b = fmt.Appendf(b, "  reason: %s\n", scan.Stats.Reason)
 	}
 
-	b = fmt.Appendf(b, "  hosts: %d in scope, %d new\n", scan.Stats.Hosts, scan.Stats.NewAssets)
+	b = fmt.Appendf(b, "  hosts: %d in scope, %d new\n", scan.Stats.Hosts, scan.Stats.NewHosts)
 	for _, state := range hostStates {
 		if n := scan.Stats.States[state]; n > 0 {
 			b = fmt.Appendf(b, "    %-11s %d\n", state, n)

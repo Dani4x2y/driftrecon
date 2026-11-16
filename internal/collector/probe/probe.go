@@ -132,6 +132,12 @@ func New(o Options) (*Prober, error) {
 	}, nil
 }
 
+// AllowsPrivate reports whether the prober connects to addresses that are
+// not public. Scans made with and without it see different services.
+func (p *Prober) AllowsPrivate() bool {
+	return p.allowPrivate
+}
+
 // The phrases recorded when a service cannot be observed. They are part of
 // stored observations and must stay stable.
 const (

@@ -70,7 +70,7 @@ func (p *Prober) handshake(ctx context.Context, o origin, addrs []netip.Addr) (*
 }
 
 func (p *Prober) negotiate(ctx context.Context, o origin, addrs []netip.Addr) (*model.TLS, []model.Certificate, error) {
-	tcp, err := p.connect(ctx, o, addrs, 0)
+	tcp, err := p.connect(ctx, o, addrs)
 	if err != nil {
 		return nil, nil, err
 	}

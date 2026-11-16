@@ -18,7 +18,7 @@ import (
 
 func get(t *testing.T, p *Prober, o origin, target string) *exchange {
 	t.Helper()
-	x, err := p.get(t.Context(), o, loopback, 0, target)
+	x, err := p.get(t.Context(), o, loopback, target)
 	if err != nil {
 		t.Fatalf("get %s: %v", target, err)
 	}
@@ -172,7 +172,7 @@ func TestGetLeavesUnknownEncodingAlone(t *testing.T) {
 func TestGetRejectsBrokenGzip(t *testing.T) {
 	srv := serveRaw(t, nil, respond("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 9\r\n\r\nnot gzip!"))
 
-	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, 0, "/")
+	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, "/")
 	wantFailure(t, err, ReasonProtocol)
 }
 
@@ -226,21 +226,21 @@ func TestGetDoesNotReadRedirectBodies(t *testing.T) {
 func TestGetRejectsOversizedHeaders(t *testing.T) {
 	srv := serveRaw(t, nil, respond("HTTP/1.1 200 OK\r\nX-Padding: "+strings.Repeat("a", maxHeadBytes)+"\r\nContent-Length: 0\r\n\r\n"))
 
-	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, 0, "/")
+	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, "/")
 	wantFailure(t, err, ReasonProtocol)
 }
 
 func TestGetRejectsOtherProtocols(t *testing.T) {
 	srv := serveRaw(t, nil, respond("SSH-2.0-OpenSSH_9.6\r\n"))
 
-	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, 0, "/")
+	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, "/")
 	wantFailure(t, err, ReasonProtocol)
 }
 
 func TestGetRejectsBodyCutShort(t *testing.T) {
 	srv := serveRaw(t, nil, respond("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial"))
 
-	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, 0, "/")
+	_, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), loopback, "/")
 	wantFailure(t, err, ReasonProtocol)
 }
 
@@ -251,7 +251,7 @@ func TestGetTimesOut(t *testing.T) {
 	p := newProber(t, Options{Timeout: 200 * time.Millisecond})
 
 	start := time.Now()
-	_, err := p.get(t.Context(), srv.origin("http"), loopback, 0, "/")
+	_, err := p.get(t.Context(), srv.origin("http"), loopback, "/")
 	wantFailure(t, err, ReasonTimeout)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Errorf("gave up after %v, want about the timeout", elapsed)
@@ -266,7 +266,7 @@ func TestGetStopsWhenScanIsCancelled(t *testing.T) {
 	time.AfterFunc(100*time.Millisecond, cancel)
 
 	start := time.Now()
-	_, err := newProber(t, Options{Timeout: 30 * time.Second}).get(ctx, srv.origin("http"), loopback, 0, "/")
+	_, err := newProber(t, Options{Timeout: 30 * time.Second}).get(ctx, srv.origin("http"), loopback, "/")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -278,7 +278,7 @@ func TestGetStopsWhenScanIsCancelled(t *testing.T) {
 func TestConnectFailure(t *testing.T) {
 	o := origin{scheme: "http", host: testHost, port: closedPort(t)}
 
-	_, err := newProber(t, Options{}).get(t.Context(), o, loopback, 0, "/")
+	_, err := newProber(t, Options{}).get(t.Context(), o, loopback, "/")
 	wantFailure(t, err, ReasonConnect)
 }
 
@@ -288,15 +288,72 @@ func TestConnectTriesTheNextAddress(t *testing.T) {
 	// 127.0.0.1 only.
 	addrs := []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.1")}
 
-	p := newProber(t, Options{})
-	x, err := p.get(t.Context(), srv.origin("http"), addrs, 0, "/")
+	x, err := newProber(t, Options{}).get(t.Context(), srv.origin("http"), addrs, "/")
 	if err != nil || x.status != 204 {
 		t.Fatalf("status = %v, err = %v", x, err)
 	}
+}
 
-	// The rotation decides where to start, not which addresses are tried.
-	if x, err = p.get(t.Context(), srv.origin("http"), addrs, 1, "/"); err != nil || x.status != 204 {
-		t.Fatalf("status = %v, err = %v", x, err)
+func TestConnectGivesUpAfterAFewAddresses(t *testing.T) {
+	// Only the last address has a listener, and it is one too far.
+	srv := serveRaw(t, nil, respond("HTTP/1.1 204 No Content\r\n\r\n"))
+	addrs := []netip.Addr{
+		netip.MustParseAddr("127.0.0.2"),
+		netip.MustParseAddr("127.0.0.3"),
+		netip.MustParseAddr("127.0.0.4"),
+		netip.MustParseAddr("127.0.0.1"),
+	}
+	global := &countingLimiter{}
+
+	_, err := newProber(t, Options{Limiter: global, Timeout: time.Second}).get(t.Context(), srv.origin("http"), addrs, "/")
+	// Depending on the platform, an address nothing listens on refuses the
+	// connection or swallows it.
+	var f *failure
+	if !errors.As(err, &f) || (f.reason != ReasonConnect && f.reason != ReasonTimeout) {
+		t.Fatalf("err = %v, want a failure to connect", err)
+	}
+	if n := global.calls.Load(); n != maxAddresses {
+		t.Errorf("connection attempts = %d, want %d", n, maxAddresses)
+	}
+}
+
+func TestRotate(t *testing.T) {
+	parse := func(list ...string) []netip.Addr {
+		var out []netip.Addr
+		for _, s := range list {
+			out = append(out, netip.MustParseAddr(s))
+		}
+		return out
+	}
+	const a, b, c, x, y = "192.0.2.1", "192.0.2.2", "192.0.2.3", "2001:db8::1", "2001:db8::2"
+
+	cases := []struct {
+		addrs []netip.Addr
+		n     int
+		want  []netip.Addr
+	}{
+		{nil, 1, nil},
+		{parse(a), 5, parse(a)},
+		{parse(a, b, c), 0, parse(a, b, c)},
+		{parse(a, b, c), 1, parse(b, c, a)},
+		{parse(a, b, c), 2, parse(c, a, b)},
+		{parse(a, b, c), 3, parse(a, b, c)},
+		// The second family stays at the end, in its own order.
+		{parse(a, b, x, y), 1, parse(b, a, x, y)},
+		{parse(a, x, y), 1, parse(a, x, y)},
+		{parse(x, y), 1, parse(y, x)},
+		{parse(x, y, a), 1, parse(y, x, a)},
+	}
+	for _, tc := range cases {
+		if got := rotate(tc.addrs, tc.n); !slices.Equal(got, tc.want) {
+			t.Errorf("rotate(%v, %d) = %v, want %v", tc.addrs, tc.n, got, tc.want)
+		}
+	}
+
+	addrs := parse(a, b, c)
+	rotate(addrs, 1)
+	if !slices.Equal(addrs, parse(a, b, c)) {
+		t.Error("rotate changed its argument")
 	}
 }
 
@@ -377,7 +434,7 @@ func TestFetchBacksOffAndSlowsDown(t *testing.T) {
 	})
 	p := newProber(t, Options{HostRate: 400})
 
-	x, err := p.fetch(t.Context(), srv.origin("http"), loopback, 0, "/")
+	x, err := p.fetch(t.Context(), srv.origin("http"), loopback, "/")
 	if err != nil || x.status != 200 {
 		t.Fatalf("exchange = %+v, err = %v", x, err)
 	}
@@ -394,7 +451,7 @@ func TestFetchDoesNotWaitOutLongPauses(t *testing.T) {
 	p := newProber(t, Options{})
 
 	start := time.Now()
-	x, err := p.fetch(t.Context(), srv.origin("http"), loopback, 0, "/")
+	x, err := p.fetch(t.Context(), srv.origin("http"), loopback, "/")
 	if err != nil || x.status != 503 {
 		t.Fatalf("exchange = %+v, err = %v", x, err)
 	}

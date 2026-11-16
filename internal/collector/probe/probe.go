@@ -220,17 +220,37 @@ func (p *Prober) usable(addrs []netip.Addr) []netip.Addr {
 	return out
 }
 
-// connect opens a TCP connection to the service, trying its addresses in
-// turn from position start on. Every attempt is subject to rate limiting.
-func (p *Prober) connect(ctx context.Context, o origin, addrs []netip.Addr, start int) (net.Conn, error) {
+// rotate returns the addresses in the order the nth sample tries them.
+// Samples take turns among the addresses of the first family listed, which
+// is how backends that are not alike get noticed. The other family is only
+// ever a fallback: on a network without working IPv6 each attempt there
+// costs a full connect timeout.
+func rotate(addrs []netip.Addr, n int) []netip.Addr {
+	if len(addrs) == 0 {
+		return nil
+	}
+	family := 1
+	for family < len(addrs) && addrs[family].Is4() == addrs[0].Is4() {
+		family++
+	}
+	out := make([]netip.Addr, 0, len(addrs))
+	for i := range family {
+		out = append(out, addrs[(n+i)%family])
+	}
+	return append(out, addrs[family:]...)
+}
+
+// connect opens a TCP connection to the service, trying the addresses in
+// the order given. Every attempt is subject to rate limiting.
+func (p *Prober) connect(ctx context.Context, o origin, addrs []netip.Addr) (net.Conn, error) {
 	dialer := net.Dialer{Timeout: p.connectTimeout}
 
 	var lastErr error
-	for i := range min(len(addrs), maxAddresses) {
+	for _, ip := range addrs[:min(len(addrs), maxAddresses)] {
 		if err := p.wait(ctx, o.host); err != nil {
 			return nil, err
 		}
-		addr := netip.AddrPortFrom(addrs[(start+i)%len(addrs)], o.port)
+		addr := netip.AddrPortFrom(ip, o.port)
 		conn, err := dialer.DialContext(ctx, "tcp", addr.String())
 		if err == nil {
 			return conn, nil

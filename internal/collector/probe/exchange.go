@@ -62,8 +62,8 @@ func (x *exchange) redirects() bool {
 // fetch requests target and honours a server that asks to be left alone for
 // a moment: it slows down for the rest of the scan and repeats the request
 // once, unless the pause asked for is too long to sit out.
-func (p *Prober) fetch(ctx context.Context, o origin, addrs []netip.Addr, start int, target string) (*exchange, error) {
-	x, err := p.get(ctx, o, addrs, start, target)
+func (p *Prober) fetch(ctx context.Context, o origin, addrs []netip.Addr, target string) (*exchange, error) {
+	x, err := p.get(ctx, o, addrs, target)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +83,7 @@ func (p *Prober) fetch(ctx context.Context, o origin, addrs []netip.Addr, start 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	return p.get(ctx, o, addrs, start, target)
+	return p.get(ctx, o, addrs, target)
 }
 
 // backoff returns how long the server wants the client to stay away, if the
@@ -109,8 +109,8 @@ func backoff(x *exchange, now time.Time) (time.Duration, bool) {
 // get performs a single GET over a connection of its own. An error is
 // either the context's, which ends the scan, or a failure, which describes
 // the service.
-func (p *Prober) get(ctx context.Context, o origin, addrs []netip.Addr, start int, target string) (*exchange, error) {
-	x, err := p.roundTrip(ctx, o, addrs, start, target)
+func (p *Prober) get(ctx context.Context, o origin, addrs []netip.Addr, target string) (*exchange, error) {
+	x, err := p.roundTrip(ctx, o, addrs, target)
 	if err != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -120,8 +120,8 @@ func (p *Prober) get(ctx context.Context, o origin, addrs []netip.Addr, start in
 // roundTrip lets net/http parse the response while keeping the bytes it was
 // parsed from on the side: a parsed header is a map and has lost the order
 // and spelling in which the server wrote the fields.
-func (p *Prober) roundTrip(ctx context.Context, o origin, addrs []netip.Addr, start int, target string) (*exchange, error) {
-	tcp, err := p.connect(ctx, o, addrs, start)
+func (p *Prober) roundTrip(ctx context.Context, o origin, addrs []netip.Addr, target string) (*exchange, error) {
+	tcp, err := p.connect(ctx, o, addrs)
 	if err != nil {
 		return nil, err
 	}

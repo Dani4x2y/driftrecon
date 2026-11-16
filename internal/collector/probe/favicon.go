@@ -13,7 +13,7 @@ import (
 // favicon fetches an icon and returns its hash. Not having one is not an
 // error: the result is then nil.
 func (p *Prober) favicon(ctx context.Context, o origin, addrs []netip.Addr, target string) (*int32, error) {
-	x, err := p.fetch(ctx, o, addrs, 0, target)
+	x, err := p.fetch(ctx, o, addrs, target)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()

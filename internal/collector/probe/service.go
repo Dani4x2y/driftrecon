@@ -175,16 +175,18 @@ type sample struct {
 // sample requests the front page and follows redirects for as long as they
 // stay on the service. A redirect that leads anywhere else is recorded and
 // left alone: its target is either a service that is examined in its own
-// right or none of the scan's business.
+// right or none of the scan's business. n numbers the sample and decides
+// which address it prefers.
 func (p *Prober) sample(ctx context.Context, t Target, o origin, addrs []netip.Addr, n int) (*sample, error) {
 	s := &sample{at: &url.URL{Scheme: o.scheme, Host: o.authority(), Path: "/"}}
 	visited := make(map[string]bool)
+	addrs = rotate(addrs, n)
 
 	for {
 		target := requestTarget(s.at)
 		visited[target] = true
 
-		x, err := p.fetch(ctx, o, addrs, n, target)
+		x, err := p.fetch(ctx, o, addrs, target)
 		if err != nil {
 			return nil, err
 		}

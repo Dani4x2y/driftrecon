@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -40,8 +41,54 @@ type Config struct {
 	ScanTimeout time.Duration `yaml:"scan_timeout"`
 	MaxHosts    int           `yaml:"max_hosts"`
 	Sources     Sources       `yaml:"sources"`
+	Probe       Probe         `yaml:"probe"`
 
 	CertSpotterToken string `yaml:"-"`
+}
+
+// maxProbePorts bounds how many ports a scan checks on every host. The tool
+// looks for web services where they are expected, it does not scan ports.
+const maxProbePorts = 10
+
+// Probe configures how the HTTP services of a host are examined.
+type Probe struct {
+	// HTTPPorts and HTTPSPorts are the ports checked on every host that
+	// resolves. With both lists empty a scan stops at name resolution.
+	HTTPPorts  []int `yaml:"http_ports"`
+	HTTPSPorts []int `yaml:"https_ports"`
+	// Rate caps the connections opened per second across all hosts,
+	// HostRate the ones to any single host.
+	Rate     float64 `yaml:"rate"`
+	HostRate float64 `yaml:"host_rate"`
+	// Timeout bounds each phase of a request.
+	Timeout time.Duration `yaml:"timeout"`
+	// AllowPrivate lets the probe connect to loopback, private and other
+	// non-public addresses. It is meant for scanning internal zones.
+	AllowPrivate bool `yaml:"allow_private"`
+}
+
+func (p Probe) validate() error {
+	switch {
+	case p.Rate <= 0:
+		return errors.New("rate must be positive")
+	case p.HostRate <= 0:
+		return errors.New("host_rate must be positive")
+	case p.Timeout <= 0:
+		return errors.New("timeout must be positive")
+	case len(p.HTTPPorts)+len(p.HTTPSPorts) > maxProbePorts:
+		return fmt.Errorf("at most %d ports can be checked per host", maxProbePorts)
+	}
+	seen := make(map[int]bool)
+	for _, port := range slices.Concat(p.HTTPPorts, p.HTTPSPorts) {
+		switch {
+		case port < 1 || port > 65535:
+			return fmt.Errorf("port %d is out of range", port)
+		case seen[port]:
+			return fmt.Errorf("port %d is listed more than once", port)
+		}
+		seen[port] = true
+	}
+	return nil
 }
 
 // Sources toggles the passive discovery sources.
@@ -85,6 +132,13 @@ func Default() Config {
 		Sources: Sources{
 			CrtSh:       Source{Enabled: true},
 			CertSpotter: Source{Enabled: true},
+		},
+		Probe: Probe{
+			HTTPPorts:  []int{80},
+			HTTPSPorts: []int{443},
+			Rate:       20,
+			HostRate:   2,
+			Timeout:    10 * time.Second,
 		},
 	}
 }
@@ -166,6 +220,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.Sources.CertSpotter.validate(); err != nil {
 		return fmt.Errorf("config: sources.certspotter: %w", err)
+	}
+	if err := c.Probe.validate(); err != nil {
+		return fmt.Errorf("config: probe: %w", err)
 	}
 	return nil
 }

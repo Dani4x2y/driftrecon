@@ -165,6 +165,69 @@ func TestSourceURL(t *testing.T) {
 	}
 }
 
+func TestProbeDefaults(t *testing.T) {
+	p := Default().Probe
+	if !slices.Equal(p.HTTPPorts, []int{80}) || !slices.Equal(p.HTTPSPorts, []int{443}) {
+		t.Errorf("ports = %v and %v, want the standard web ports", p.HTTPPorts, p.HTTPSPorts)
+	}
+	if p.AllowPrivate {
+		t.Error("non-public addresses must be off limits by default")
+	}
+	if p.HostRate > 5 || p.Rate < p.HostRate {
+		t.Errorf("rates = %v overall, %v per host", p.Rate, p.HostRate)
+	}
+}
+
+func TestProbeSettings(t *testing.T) {
+	isolateHome(t)
+
+	cfg, err := Load(writeConfig(t, `
+probe:
+  http_ports: [80, 8080]
+  https_ports: []
+  host_rate: 0.5
+  allow_private: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, def := cfg.Probe, Default().Probe
+	if !slices.Equal(p.HTTPPorts, []int{80, 8080}) || len(p.HTTPSPorts) != 0 {
+		t.Errorf("ports = %v and %v, want the lists from the file", p.HTTPPorts, p.HTTPSPorts)
+	}
+	if p.HostRate != 0.5 || !p.AllowPrivate {
+		t.Errorf("probe = %+v", p)
+	}
+	if p.Rate != def.Rate || p.Timeout != def.Timeout {
+		t.Errorf("unset keys lost their defaults: %+v", p)
+	}
+
+	// Probing can be switched off altogether.
+	cfg, err = Load(writeConfig(t, "probe:\n  http_ports: []\n  https_ports: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Probe.HTTPPorts)+len(cfg.Probe.HTTPSPorts) != 0 {
+		t.Errorf("ports = %v and %v", cfg.Probe.HTTPPorts, cfg.Probe.HTTPSPorts)
+	}
+
+	cases := map[string]string{
+		"zero rate":          "probe:\n  rate: 0\n",
+		"negative host rate": "probe:\n  host_rate: -2\n",
+		"zero timeout":       "probe:\n  timeout: 0s\n",
+		"port zero":          "probe:\n  http_ports: [0]\n",
+		"port out of range":  "probe:\n  https_ports: [70000]\n",
+		"port listed twice":  "probe:\n  http_ports: [80, 8443]\n  https_ports: [443, 8443]\n",
+		"port scan":          "probe:\n  http_ports: [80, 81, 82, 83, 84, 85, 86, 87, 88, 89]\n",
+		"unknown key":        "probe:\n  retries: 3\n",
+	}
+	for name, body := range cases {
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("%s: Load succeeded, want error", name)
+		}
+	}
+}
+
 func TestDefaultUserAgentIdentifiesTool(t *testing.T) {
 	ua := Default().UserAgent
 	if !strings.HasPrefix(ua, "driftrecon/") || !strings.Contains(ua, projectURL) {
